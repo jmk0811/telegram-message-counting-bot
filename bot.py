@@ -162,7 +162,6 @@ def run():
         
     except Exception as e:
         print(e)
-        return
         run()
     
 run()
