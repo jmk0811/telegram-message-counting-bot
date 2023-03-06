@@ -1,13 +1,24 @@
 import telebot
 import configparser
+import firebase_admin
+from firebase_admin import credentials
+from firebase_admin import db
+import string
 
 def run():
     try:
         config = configparser.ConfigParser()    
-        config.read('config.ini', encoding='utf-8') 
+        config.read('config.ini', encoding='utf-8')
 
         API_KEY = config['bot_setup']['api_key']
         bot = telebot.TeleBot(API_KEY)
+
+        cred = credentials.Certificate("./certificate.json")
+        firebase_admin.initialize_app(cred,{
+            "databaseURL" : config['bot_setup']['database_url']
+        })
+
+        db_ref = db.reference()
 
         message_counts = {}
         count_flag = {}
@@ -18,11 +29,13 @@ def run():
             user_id = message.from_user.id
             chat_member = bot.get_chat_member(chat_id, user_id)
             if chat_member.status == 'administrator' or chat_member.status == "creator":
-                bot.reply_to(message, "메세지 기록을 시작합니다.")
-                message_counts.clear()
-                count_flag[chat_id] = True
+                bot.reply_to(message, "Start message counting.")
+                #message_counts.clear()
+                #count_flag[chat_id] = True
+                chat_ref = db_ref.child(str(chat_id))
+                chat_ref.update({ "users": { user_id: { "msg_cnt": 0, "char_cnt": 0 } }, "count_flag": True })
             else:
-                bot.send_message(chat_id, "운영자가 아닙니다.")
+                bot.send_message(chat_id, "You are not admin.")
                 
         @bot.message_handler(commands=['end'])
         def end(message):
@@ -30,10 +43,12 @@ def run():
             user_id = message.from_user.id
             chat_member = bot.get_chat_member(chat_id, user_id)
             if chat_member.status == 'administrator' or chat_member.status == "creator":
-                bot.reply_to(message, "메세지 기록을 종료합니다.")
-                count_flag[chat_id] = False
+                bot.reply_to(message, "End message counting.")
+                #count_flag[chat_id] = False
+                chat_ref = db_ref.child(str(chat_id))
+                chat_ref.update({ "count_flag": False })
             else:
-                bot.send_message(chat_id, "운영자가 아닙니다.")
+                bot.send_message(chat_id, "You are not admin.")
 
         @bot.message_handler(commands=['show_msg_count'])
         def show_count(message):
@@ -42,10 +57,15 @@ def run():
             first_name = message.from_user.first_name or ""
             last_name = message.from_user.last_name or ""
             username = message.from_user.username or ""
-            if (chat_id, user_id) in message_counts:
-                count = message_counts[(chat_id, user_id)][0]
-            else:
-                count = 0
+            
+            chat_ref = db_ref.child(str(chat_id))
+            chat = chat_ref.get()
+            if chat == None: return
+            users_ref = chat_ref.child("users")
+            user_ref = users_ref.child(str(user_id))
+            user = user_ref.get()
+            if user == None: count = 0
+            else: count = user["msg_cnt"]
 
             bot.send_message(chat_id, f'{first_name} {last_name} {username} {user_id} The number of messages: {count}')
             
@@ -56,10 +76,15 @@ def run():
             first_name = message.from_user.first_name or ""
             last_name = message.from_user.last_name or ""
             username = message.from_user.username or ""
-            if (chat_id, user_id) in message_counts:
-                count = message_counts[(chat_id, user_id)][1]
-            else:
-                count = 0
+
+            chat_ref = db_ref.child(str(chat_id))
+            chat = chat_ref.get()
+            if chat == None: return
+            users_ref = chat_ref.child("users")
+            user_ref = users_ref.child(str(user_id))
+            user = user_ref.get()
+            if user == None: count = 0
+            else: count = user["char_cnt"]
 
             bot.send_message(chat_id, f'{first_name} {last_name} {username} {user_id} The number of text: {count}')
             
@@ -69,46 +94,67 @@ def run():
             user_id = message.from_user.id
             chat_member = bot.get_chat_member(chat_id, user_id)
             if chat_member.status == 'administrator' or chat_member.status == "creator":
-                rank = sorted(message_counts.items(), key=lambda x: x[1][1], reverse = True)
-                rank = [x for x in rank if x[0][0] == chat_id]
-                print(rank)
+                chat_ref = db_ref.child(str(chat_id))
+                chat = chat_ref.get()
+                if chat == None: return
+                users_ref = chat_ref.child("users")
+                users = users_ref.get()
+                if users == None: return
+
+                rank = sorted(users.items(), key=lambda x: x[1]["char_cnt"], reverse = True)
                 length = len(rank)
                 if length > 10: loop = 10
                 else: loop = length
+                print(rank)
                 for i in range(loop):
-                    chat_member = bot.get_chat_member(message.chat.id, rank[i][0][1])
+                    chat_member = bot.get_chat_member(message.chat.id, rank[i][0])
                     first_name = chat_member.user.first_name or ""
                     last_name = chat_member.user.last_name or ""
                     username = chat_member.user.username or ""
-                    count = rank[i][1][1]
+                    count = rank[i][1]["char_cnt"]
                     bot.send_message(chat_id, f'No.{i+1}: {first_name} {last_name} {username} {user_id} The number of text: {count}')
+
             else:
-                bot.send_message(chat_id, "운영자가 아닙니다.")
+                bot.send_message(chat_id, "You are not admin.")
 
         @bot.message_handler(commands=['help'])
         def help(message):
-            chat_id = message.chat.id
-            user_id = message.from_user.id
-            bot.reply_to(message, "전 다음 명령어들을 지원합니다. \n /start \n /end \n /show_msg_count \n /show_char_count \n /rank \n /info \n /help \n /status")
+            bot.reply_to(message, "Following commands are supported: \n /start \n /end \n /show_msg_count \n /show_char_count \n /rank \n /info \n /help \n /status")
 
         @bot.message_handler(commands=['info'])
         def info(message):
-            bot.reply_to(message, "전 텔레그램 메세지 카운터 봇 입니다. 유저들의 메세지와 글자 수를 기록합니다.")
+            bot.reply_to(message, "Hello, I am a telegram message counting bot. I count and record the number of users' messages.")
 
         @bot.message_handler(commands=['status'])
         def status(message):
-            bot.reply_to(message, "봇이 작동중입니다.")
+            bot.reply_to(message, "The bot is running.")
             
         @bot.message_handler(func=lambda message: True)
         def count_message(message):
             chat_id = message.chat.id
-            if chat_id in count_flag and count_flag[chat_id]:
-                user_id = message.from_user.id
-                if (chat_id, user_id) in message_counts:
-                    message_counts[(chat_id, user_id)][0] += 1
-                    message_counts[(chat_id, user_id)][1] += len(message.text)
+            user_id = message.from_user.id
+
+            chat_ref = db_ref.child(str(chat_id))
+            chat = chat_ref.get()
+
+            if chat == None: return
+
+            if chat["count_flag"]:
+                users_ref = chat_ref.child("users")
+                user_ref = users_ref.child(str(user_id))
+                user = user_ref.get()
+
+                cnt = 0
+                for char in message.text:
+                    if char in string.ascii_letters:
+                        cnt += 1
+                
+                if user == None:
+                    users_ref.update({ user_id: { "msg_cnt": 1, "char_cnt": cnt }})
                 else:
-                    message_counts[(chat_id, user_id)] = [1, len(message.text)]
+                    new_msg_cnt = user["msg_cnt"] + 1
+                    new_char_cnt = user["char_cnt"] + cnt
+                    user_ref.update({ "msg_cnt": new_msg_cnt, "char_cnt": new_char_cnt })
             
         print("Hey, I am up....")
         bot.polling()
@@ -116,6 +162,7 @@ def run():
         
     except Exception as e:
         print(e)
+        return
         run()
     
 run()
